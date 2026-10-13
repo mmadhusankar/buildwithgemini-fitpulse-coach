@@ -460,6 +460,73 @@ def generate_fitness_visual(
         return {"error": f"Failed to generate and upload visual: {str(e)}"}
 
 
+def generate_fitness_video(
+    prompt: str,
+    title: str,
+    tool_context: ToolContext,
+) -> Dict[str, Any]:
+    """Generate a short video for an exercise, workout demo, or healthy recipe preparation
+    using Google's Omni model (gemini-omni-flash-preview) in the global region.
+    Saves the video as an artifact for the Playground, uploads it to Cloud Storage,
+    and returns its public HTTPS URL.
+
+    Args:
+        prompt: Detailed description of the video to generate (e.g. 'A fitness athlete performing clean form bodyweight squats in a sunny gym, smooth continuous motion').
+        title: Short title or filename slug for the video (e.g. 'bodyweight_squats_demo').
+        tool_context: ADK ToolContext injected by the framework.
+
+    Returns:
+        A dictionary containing the public video URL, filename, title, and status message.
+    """
+    import base64
+    import re
+    import uuid
+
+    clean_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", title.lower().strip())
+    unique_id = uuid.uuid4().hex[:6]
+    filename = f"{clean_slug}_{unique_id}.mp4"
+    mime_type = "video/mp4"
+
+    try:
+        client = get_genai_client()
+        interaction = client.interactions.create(
+            model="gemini-omni-flash-preview",
+            input=f"Generate a clear, high quality fitness video: {prompt}",
+        )
+
+        video_bytes: Optional[bytes] = None
+        if hasattr(interaction, "output_video") and interaction.output_video:
+            raw_data = getattr(interaction.output_video, "data", None)
+            if raw_data:
+                video_bytes = base64.b64decode(raw_data) if isinstance(raw_data, str) else raw_data
+            if getattr(interaction.output_video, "mime_type", None):
+                mime_type = interaction.output_video.mime_type
+
+        if not video_bytes:
+            return {"error": "Omni model did not return video bytes."}
+
+        # 1. Save artifact to ToolContext for the Playground's Artifacts panel
+        part = types.Part.from_bytes(data=video_bytes, mime_type=mime_type)
+        tool_context.save_artifact(filename=filename, artifact=part)
+
+        # 2. Upload video bytes directly to the public Cloud Storage bucket
+        storage_client = get_storage_client()
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(filename)
+        blob.upload_from_string(video_bytes, content_type=mime_type)
+
+        public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{filename}"
+
+        return {
+            "title": title,
+            "filename": filename,
+            "public_url": public_url,
+            "message": f"Successfully generated video and uploaded to {public_url}",
+        }
+    except Exception as e:
+        return {"error": f"Failed to generate and upload video: {str(e)}"}
+
+
 AGENT_ENGINE_ID = "projects/494577185714/locations/us-east1/reasoningEngines/8709448207404367872"
 SANDBOX_RESOURCE_NAME = "projects/494577185714/locations/us-east1/reasoningEngines/8709448207404367872/sandboxEnvironments/7674881432946212864"
 
@@ -491,6 +558,7 @@ You can:
 - Safely run Python code in the sandbox to calculate complex training progressions, 1-rep max curves, or custom math.
 - Geocode addresses and find nearby gyms, fitness centers, or parks via `geocode_address` and `find_nearby_places`.
 - Generate visuals of meals, exercises, or milestone badges via `generate_fitness_visual`.
+- Generate short demo videos of exercises, workout routines, or recipe preps via `generate_fitness_video`.
 - Log completed workouts, meals, and hydration via `log_activity_or_meal`.
 - Check the user's recent activity history via `get_user_activity_logs`.
 Always be encouraging, actionable, and structured in your guidance."""
@@ -536,6 +604,7 @@ root_agent = Agent(
         geocode_address,
         find_nearby_places,
         generate_fitness_visual,
+        generate_fitness_video,
         log_activity_or_meal,
         get_user_activity_logs,
     ],
